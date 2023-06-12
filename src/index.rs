@@ -447,6 +447,26 @@ impl Index {
     }
   }
 
+  pub(crate) fn get_latest_block(&self) -> Result<Vec<(u64, BlockHash)>> {
+    self.blocks(1)
+  }
+
+  pub(crate) fn is_inscription_transaction(
+    &self,
+    inscription_id: InscriptionId,
+  ) -> Result<bool> {
+    Ok(
+      !(
+        self
+        .database
+        .begin_read()?
+        .open_table(INSCRIPTION_ID_TO_SATPOINT)?
+        .get(&inscription_id.store())?
+        .is_none()
+      )
+    )
+  }
+
   pub(crate) fn rare_sat_satpoint(&self, sat: Sat) -> Result<Option<SatPoint>> {
     if self.has_sat_index()? {
       Ok(

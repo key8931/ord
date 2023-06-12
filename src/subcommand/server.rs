@@ -55,6 +55,73 @@ impl FromStr for BlockQuery {
   }
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct GetBlockHeightResponse {
+  height: u64,
+  // hash: &'static str,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct GetInscriptionResponse {
+  inscription_number: i64,
+  inscription_id: String,
+  address: String,
+  output_value: u64,
+  sat: u64,
+  content_length: Option<usize>,
+  content_types: Option<String>,
+  content: String,
+  timestamp: u64,
+  genesis_height: u64,
+  genesis_tx: String,
+  location: String,
+  output: String,
+  offset: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct GetBlockResponse {
+  height: u64,
+  hash: String,
+  target: String,
+  timestamp: u64,
+  size: usize,
+  weight: usize,
+  previous: String,
+  transactions: Vec<String>,
+  inscriptions: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct GetBlockAllInOneNode {
+  inscription_number: i64,
+  inscription_id: String,
+  address: String,
+  output_value: u64,
+  sat: u64,
+  content_length: Option<usize>,
+  content_types: Option<String>,
+  timestamp: u64,
+  genesis_height: u64,
+  genesis_tx: String,
+  location: String,
+  output: String,
+  offset: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct GetBlockAllInOneResponse {
+  height: u64,
+  hash: String,
+  target: String,
+  timestamp: u64,
+  size: usize,
+  weight: usize,
+  previous: String,
+  transactions: Vec<String>,
+  inscriptions: Vec<GetBlockAllInOneNode>,
+}
+
 enum SpawnConfig {
   Https(AxumAcceptor),
   Http,
@@ -168,6 +235,18 @@ impl Server {
         .route("/static/*path", get(Self::static_asset))
         .route("/status", get(Self::status))
         .route("/tx/:txid", get(Self::transaction))
+        .route("/api/v1/getBlock/:query", get(Self::get_block))
+        .route("/api/v1/allInOne/:query", get(Self::all_in_one))
+        .route(
+          "/api/v1/getInscription/:inscription_id",
+          get(Self::get_inscription),
+        )
+        .route(
+          "/api/v1/getBlockList/:start/:end",
+          get(Self::get_block_list),
+        )
+        .route("/api/v1/getLatestBlock", get(Self::get_latest_block))
+        .route("/api/v1/getTx/:txid", get(Self::get_tx))
         .layer(Extension(index))
         .layer(Extension(page_config))
         .layer(Extension(Arc::new(config)))
@@ -471,6 +550,237 @@ impl Server {
       HomeHtml::new(index.blocks(100)?, index.get_homepage_inscriptions()?)
         .page(page_config, index.has_sat_index()?),
     )
+  }
+
+  async fn get_block(
+    // Extension(page_config): Extension<Arc<PageConfig>>,
+    Extension(index): Extension<Arc<Index>>,
+    Path(DeserializeFromStr(query)): Path<DeserializeFromStr<BlockQuery>>,
+  ) -> ServerResult<String> {
+    let (block, height) = match query {
+      BlockQuery::Height(height) => {
+        let block = index
+          .get_block_by_height(height)?
+          .ok_or_not_found(|| format!("block {height}"))?;
+
+        (block, height)
+      }
+      BlockQuery::Hash(hash) => {
+        let info = index
+          .block_header_info(hash)?
+          .ok_or_not_found(|| format!("block {hash}"))?;
+
+        let block = index
+          .get_block_by_hash(hash)?
+          .ok_or_not_found(|| format!("block {hash}"))?;
+
+        (block, info.height as u64)
+      }
+    };
+    let transactions: Vec<String> = block
+      .txdata
+      .iter()
+      .map(|tx| tx.txid().to_string())
+      .collect();
+    let inscriptions: Vec<String> = block
+      .txdata
+      .iter()
+      .filter(|x| index.is_inscription_transaction(x.txid().into()).unwrap())
+      .map(|tx| tx.txid().to_string())
+      .collect();
+
+    let resp = GetBlockResponse {
+      hash: block.block_hash().to_string(),
+      height,
+      timestamp: block.header.time as u64,
+      target: block.header.target().to_string(),
+      size: block.size(),
+      weight: block.weight(),
+      previous: block.header.prev_blockhash.to_string(),
+      transactions,
+      inscriptions,
+    };
+
+    Ok(serde_json::to_string(&resp).unwrap())
+  }
+
+  async fn all_in_one(
+    Extension(page_config): Extension<Arc<PageConfig>>,
+    Extension(index): Extension<Arc<Index>>,
+    Path(DeserializeFromStr(query)): Path<DeserializeFromStr<BlockQuery>>,
+  ) -> ServerResult<String> {
+    let (block, height) = match query {
+      BlockQuery::Height(height) => {
+        let block = index
+          .get_block_by_height(height)?
+          .ok_or_not_found(|| format!("block {height}"))?;
+
+        (block, height)
+      }
+      BlockQuery::Hash(hash) => {
+        let info = index
+          .block_header_info(hash)?
+          .ok_or_not_found(|| format!("block {hash}"))?;
+
+        let block = index
+          .get_block_by_hash(hash)?
+          .ok_or_not_found(|| format!("block {hash}"))?;
+
+        (block, info.height as u64)
+      }
+    };
+    let transactions: Vec<String> = block
+      .txdata
+      .iter()
+      .map(|tx| tx.txid().to_string())
+      .collect();
+    let inscription_ids: Vec<Txid> = block
+      .txdata
+      .iter()
+      .filter(|x| index.is_inscription_transaction(x.txid().into()).unwrap())
+      .map(|tx| tx.txid())
+      .collect();
+    let mut inscriptions: Vec<GetBlockAllInOneNode> = Vec::new();
+
+    for item in inscription_ids.iter() {
+      let inscription_id = InscriptionId {
+        txid: *item,
+        index: 0,
+      };
+
+      let entry = index
+        .get_inscription_entry(inscription_id)?
+        .ok_or_not_found(|| format!("inscription {inscription_id}"))?;
+
+      let inscription = index
+        .get_inscription_by_id(inscription_id)?
+        .ok_or_not_found(|| format!("inscription {inscription_id}"))?;
+
+      let satpoint = index
+        .get_inscription_satpoint_by_id(inscription_id)?
+        .ok_or_not_found(|| format!("inscription {inscription_id}"))?;
+
+      let output = index
+        .get_transaction(satpoint.outpoint.txid)?
+        .ok_or_not_found(|| format!("inscription {inscription_id} current transaction"))?
+        .output
+        .into_iter()
+        .nth(satpoint.outpoint.vout.try_into().unwrap())
+        .ok_or_not_found(|| format!("inscription {inscription_id} current transaction output"))?;
+
+      let address = match page_config.chain.address_from_script(&output.script_pubkey) {
+        Ok(address) => address,
+        Err(_) => return Err(ServerError::NotFound(format!("NotFound"))),
+      };
+
+      let node = GetBlockAllInOneNode {
+        inscription_number: entry.number,
+        inscription_id: inscription_id.to_string(),
+        address: address.to_string(),
+        output_value: output.value,
+        sat: entry.sat.unwrap_or(Sat(0)).n(),
+        content_length: inscription.content_length(),
+        content_types: inscription.content_type().map(|x| x.to_owned()),
+        timestamp: entry.timestamp as u64,
+        genesis_height: entry.height,
+        genesis_tx: inscription_id.txid.to_string(),
+        location: satpoint.to_string(),
+        output: satpoint.outpoint.to_string(),
+        offset: satpoint.offset,
+      };
+      inscriptions.push(node);
+    }
+
+    let resp = GetBlockAllInOneResponse {
+      hash: block.block_hash().to_string(),
+      height,
+      timestamp: block.header.time as u64,
+      target: block.header.target().to_string(),
+      size: block.size(),
+      weight: block.weight(),
+      previous: block.header.prev_blockhash.to_string(),
+      transactions,
+      inscriptions,
+    };
+
+    Ok(serde_json::to_string(&resp).unwrap())
+  }
+
+  async fn get_block_list(
+    Extension(index): Extension<Arc<Index>>,
+    Path((DeserializeFromStr(start), DeserializeFromStr(end))): Path<(
+      DeserializeFromStr<usize>,
+      DeserializeFromStr<usize>,
+    )>,
+  ) -> ServerResult<String> {
+    Ok("".to_string())
+  }
+
+  async fn get_latest_block(Extension(index): Extension<Arc<Index>>) -> ServerResult<String> {
+    let block = match index.get_latest_block() {
+      Ok(block) => block,
+      Err(err) => return Err(ServerError::NotFound(err.to_string())),
+    };
+    Ok(serde_json::to_string(&block).unwrap())
+  }
+
+  async fn get_tx(
+    Extension(index): Extension<Arc<Index>>,
+    Path(txid): Path<Txid>,
+  ) -> ServerResult<String> {
+    let inscription_id: InscriptionId = txid.into();
+    let res = index.is_inscription_transaction(inscription_id).unwrap();
+    Ok(serde_json::to_string(&res).unwrap())
+  }
+
+  async fn get_inscription(
+    Extension(page_config): Extension<Arc<PageConfig>>,
+    Extension(index): Extension<Arc<Index>>,
+    Path(inscription_id): Path<InscriptionId>,
+  ) -> ServerResult<String> {
+    let entry = index
+      .get_inscription_entry(inscription_id)?
+      .ok_or_not_found(|| format!("inscription {inscription_id}"))?;
+
+    let inscription = index
+      .get_inscription_by_id(inscription_id)?
+      .ok_or_not_found(|| format!("inscription {inscription_id}"))?;
+
+    let satpoint = index
+      .get_inscription_satpoint_by_id(inscription_id)?
+      .ok_or_not_found(|| format!("inscription {inscription_id}"))?;
+
+    let output = index
+      .get_transaction(satpoint.outpoint.txid)?
+      .ok_or_not_found(|| format!("inscription {inscription_id} current transaction"))?
+      .output
+      .into_iter()
+      .nth(satpoint.outpoint.vout.try_into().unwrap())
+      .ok_or_not_found(|| format!("inscription {inscription_id} current transaction output"))?;
+
+    let address = match page_config.chain.address_from_script(&output.script_pubkey) {
+      Ok(address) => address,
+      Err(_) => return Err(ServerError::NotFound(format!("NotFound"))),
+    };
+
+    let res: GetInscriptionResponse = GetInscriptionResponse {
+      inscription_number: entry.number,
+      inscription_id: inscription_id.to_string(),
+      address: address.to_string(),
+      output_value: output.value,
+      sat: entry.sat.unwrap_or(Sat(0)).n(),
+      content_length: inscription.content_length(),
+      content_types: inscription.content_type().map(|x| x.to_owned()),
+      content: hex::encode(inscription.into_body().unwrap_or_default()),
+      timestamp: entry.timestamp as u64,
+      genesis_height: entry.height,
+      genesis_tx: inscription_id.txid.to_string(),
+      location: satpoint.to_string(),
+      output: satpoint.outpoint.to_string(),
+      offset: satpoint.offset,
+    };
+
+    Ok(serde_json::to_string(&res).unwrap())
   }
 
   async fn install_script() -> Redirect {
